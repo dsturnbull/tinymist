@@ -44,6 +44,7 @@ pub struct WebviewActor<'a, C> {
     broadcast_sender: broadcast::Sender<WebviewActorRequest>,
     editor_sender: mpsc::UnboundedSender<EditorActorRequest>,
     render_sender: broadcast::Sender<RenderActorRequest>,
+    server_svg: bool,
 }
 
 pub struct Channels {
@@ -70,6 +71,7 @@ where
         mailbox: broadcast::Receiver<WebviewActorRequest>,
         editor_sender: mpsc::UnboundedSender<EditorActorRequest>,
         render_sender: broadcast::Sender<RenderActorRequest>,
+        server_svg: bool,
     ) -> Self {
         Self {
             webview_websocket_conn: websocket_conn,
@@ -78,6 +80,7 @@ where
             broadcast_sender,
             editor_sender,
             render_sender,
+            server_svg,
         }
     }
 
@@ -112,8 +115,14 @@ where
                 Some(svg) = self.svg_receiver.recv() => {
                     log::trace!("WebviewActor: received svg from renderer");
                     let _scope = typst_timing::TimingScope::new("webview_actor_send_svg");
-                    self.webview_websocket_conn.send(WsMessage::Binary(svg.into()))
-                    .await.log_error("WebViewActor");
+                    if self.server_svg {
+                        let text = String::from_utf8_lossy(&svg).into_owned();
+                        self.webview_websocket_conn.send(WsMessage::Text(text))
+                            .await.log_error("WebViewActor");
+                    } else {
+                        self.webview_websocket_conn.send(WsMessage::Binary(svg.into()))
+                            .await.log_error("WebViewActor");
+                    }
                 }
                 Some(msg) = self.webview_websocket_conn.next() => {
                     log::trace!("WebviewActor: received message from websocket: {msg:?}");

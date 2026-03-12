@@ -6619,6 +6619,7 @@ dependencies = [
  "typst",
  "typst-assets",
  "typst-macros",
+ "typst-svg",
  "typst-timing 0.14.2",
 ]
 

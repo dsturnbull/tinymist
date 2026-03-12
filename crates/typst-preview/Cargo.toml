@@ -30,6 +30,7 @@ tokio = { workspace = true, features = ["time", "rt-multi-thread"] }
 typst.workspace = true
 typst-macros.workspace = true
 typst-timing.workspace = true
+typst-svg.workspace = true
 typst-assets.workspace = true
 
 

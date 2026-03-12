@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::ops::Range;
+use std::hash::{DefaultHasher, Hasher};
 use std::sync::Arc;
 
 use reflexo_typst::debug_loc::{
@@ -6,6 +8,7 @@ use reflexo_typst::debug_loc::{
 };
 use reflexo_vec2svg::IncrSvgDocServer;
 use tinymist_std::typst::TypstDocument;
+use typst::layout::Abs;
 use tokio::sync::{broadcast, mpsc};
 
 use super::{editor::EditorActorRequest, webview::WebviewActorRequest};
@@ -48,6 +51,9 @@ pub struct RenderActor {
     editor_conn_sender: mpsc::UnboundedSender<EditorActorRequest>,
     svg_sender: mpsc::UnboundedSender<Vec<u8>>,
     webview_sender: broadcast::Sender<WebviewActorRequest>,
+    server_svg: bool,
+    strip_svg_glyph_defs: bool,
+    cached_glyph_defs_hashes: HashMap<usize, u64>,
 }
 
 impl RenderActor {
@@ -57,6 +63,8 @@ impl RenderActor {
         editor_conn_sender: mpsc::UnboundedSender<EditorActorRequest>,
         svg_sender: mpsc::UnboundedSender<Vec<u8>>,
         webview_sender: broadcast::Sender<WebviewActorRequest>,
+        server_svg: bool,
+        strip_svg_glyph_defs: bool,
     ) -> Self {
         let mut res = Self {
             mailbox,
@@ -65,6 +73,9 @@ impl RenderActor {
             editor_conn_sender,
             svg_sender,
             webview_sender,
+            server_svg,
+            strip_svg_glyph_defs,
+            cached_glyph_defs_hashes: HashMap::new(),
         };
         res.renderer.set_should_attach_debug_info(true);
         res
@@ -151,11 +162,26 @@ impl RenderActor {
                 continue;
             };
 
-            let data = self.render(has_full_render, &document);
-            let Ok(_) = self.svg_sender.send(data) else {
-                log::info!("RenderActor: svg_sender is dropped");
-                break;
-            };
+            if self.server_svg {
+                let pages = self.render_svg(&document);
+                let mut sender_dropped = false;
+                for page_data in pages {
+                    if self.svg_sender.send(page_data).is_err() {
+                        log::info!("RenderActor: svg_sender is dropped");
+                        sender_dropped = true;
+                        break;
+                    }
+                }
+                if sender_dropped {
+                    break;
+                }
+            } else {
+                let data = self.render(has_full_render, &document);
+                let Ok(_) = self.svg_sender.send(data) else {
+                    log::info!("RenderActor: svg_sender is dropped");
+                    break;
+                };
+            }
         }
         log::info!("RenderActor: exiting")
     }
@@ -169,6 +195,67 @@ impl RenderActor {
             }
         } else {
             self.render_delta(document)
+        }
+    }
+
+    fn render_svg(&mut self, document: &TypstDocument) -> Vec<Vec<u8>> {
+        match document {
+            TypstDocument::Paged(doc) => {
+                let total = doc.pages.len();
+                log::info!("RenderActor: render_svg: Paged document with {total} pages");
+                if total == 0 {
+                    return Vec::new();
+                }
+                doc.pages
+                    .iter()
+                    .enumerate()
+                    .map(|(index, page)| {
+                        let svg = typst_svg::svg(page);
+                        let svg_bytes = if self.strip_svg_glyph_defs {
+                            self.strip_cached_glyph_defs(index, svg)
+                        } else {
+                            svg.into_bytes()
+                        };
+                        let header = format!("page:{index}:{total}\n");
+                        let mut data = header.into_bytes();
+                        data.extend_from_slice(&svg_bytes);
+                        data
+                    })
+                    .collect()
+            }
+            TypstDocument::Html(_) => {
+                log::info!("RenderActor: render_svg: Html document (not supported)");
+                vec![b"<svg xmlns=\"http://www.w3.org/2000/svg\"><text>HTML target not supported in SVG mode</text></svg>".to_vec()]
+            }
+        }
+    }
+
+    fn strip_cached_glyph_defs(&mut self, page_index: usize, svg: String) -> Vec<u8> {
+        let defs_start_tag = "<defs id=\"glyph\">";
+        let defs_end_tag = "</defs>";
+
+        let Some(start) = svg.find(defs_start_tag) else {
+            return svg.into_bytes();
+        };
+        let Some(end_rel) = svg[start..].find(defs_end_tag) else {
+            return svg.into_bytes();
+        };
+        let end = start + end_rel + defs_end_tag.len();
+        let defs_section = &svg[start..end];
+
+        let mut hasher = DefaultHasher::new();
+        hasher.write(defs_section.as_bytes());
+        let hash = hasher.finish();
+
+        let cached = self.cached_glyph_defs_hashes.get(&page_index).copied();
+        if cached == Some(hash) {
+            let mut result = String::with_capacity(svg.len() - defs_section.len());
+            result.push_str(&svg[..start]);
+            result.push_str(&svg[end..]);
+            result.into_bytes()
+        } else {
+            self.cached_glyph_defs_hashes.insert(page_index, hash);
+            svg.into_bytes()
         }
     }
 

@@ -54,6 +54,14 @@ pub struct PreviewConfig {
     pub refresh_style: TaskWhen,
     /// The invert colors setting for the preview.
     pub invert_colors: String,
+    /// When true, render complete SVG server-side and send as text WebSocket
+    /// messages instead of binary vector IR.
+    pub server_svg: bool,
+    /// When true (and `server_svg` is also true), strip unchanged glyph
+    /// `<defs>` from SVGs after the first frame.  Reduces per-frame
+    /// WebSocket transfer from ~2MB to ~200KB.  The receiving client must
+    /// cache and re-inject the stripped defs.
+    pub strip_svg_glyph_defs: bool,
 }
 
 /// Gets the HTML for the frontend by a given preview mode and server to connect
@@ -148,6 +156,7 @@ impl Previewer {
                     h.webview_tx.subscribe(),
                     h.editor_tx.clone(),
                     h.renderer_tx.clone(),
+                    h.server_svg,
                 );
                 let render_actor = actor::render::RenderActor::new(
                     h.renderer_tx.subscribe(),
@@ -155,6 +164,8 @@ impl Previewer {
                     h.editor_tx.clone(),
                     svg.0,
                     h.webview_tx,
+                    h.server_svg,
+                    h.strip_svg_glyph_defs,
                 );
                 tokio::spawn(render_actor.run());
                 let outline_render_actor = actor::render::OutlineRenderActor::new(
@@ -293,6 +304,8 @@ impl PreviewBuilder {
             renderer_tx: renderer_mailbox.0.clone(),
             enable_partial_rendering: config.enable_partial_rendering,
             doc_sender,
+            server_svg: config.server_svg,
+            strip_svg_glyph_defs: config.strip_svg_glyph_defs,
         };
 
         Previewer {
@@ -485,6 +498,8 @@ struct DataPlane {
     invert_colors: String,
     renderer_tx: broadcast::Sender<RenderActorRequest>,
     doc_sender: Arc<parking_lot::RwLock<Option<Arc<dyn CompileView>>>>,
+    server_svg: bool,
+    strip_svg_glyph_defs: bool,
 }
 
 /// The invert colors for the preview.
